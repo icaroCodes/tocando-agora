@@ -228,7 +228,9 @@
     let d;
     try { d = JSON.parse(new TextDecoder().decode(await unprotect(fromB64(m.message)))); }
     catch (err) { return; } // mensagem antiga ou de outra chave
-    lastMsg = { d, at: m.time * 1000 };
+    // outra mensagem mais nova pode ter chegado enquanto esta era decifrada
+    if (lastMsg && (m.time * 1000 < lastMsg.at || m.id === lastMsg.id)) return;
+    lastMsg = { d, at: m.time * 1000, id: m.id };
     const att = d.title && m.attachment?.url;
     if (att !== coverState.att) {
       Object.assign(coverState, { att: att || null, src: null });
