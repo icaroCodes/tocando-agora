@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tocando Agora</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Pixelify+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --card: #191919; /* mesma cor do fundo do Notion (modo escuro) */
+    --fg: #ecece8;
+    --muted: #75756f;
+    --green: #1db954;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: var(--card); height: 100%; overflow: hidden; }
+  body { font-family: "Pixelify Sans", ui-monospace, monospace; color: var(--fg); }
+
+  .wrap {
+    height: 100%;
+    padding: 12px clamp(12px, 3vw, 24px);
+    display: flex; align-items: center; gap: clamp(14px, 3vw, 28px);
+  }
+  /* a arte tem 76x48 pixels; a capa real fica por cima, na posição 3,4 com 40x40 */
+  .art { position: relative; height: 100%; aspect-ratio: 76 / 48; flex: none; }
+  canvas {
+    display: block; width: 100%; height: 100%;
+    image-rendering: pixelated; image-rendering: crisp-edges;
+  }
+  #cover {
+    position: absolute;
+    left: calc(3 / 76 * 100%); top: calc(4 / 48 * 100%);
+    width: calc(40 / 76 * 100%); height: calc(40 / 48 * 100%);
+    object-fit: cover;
+  }
+
+  .info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .title, .artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .title { font-size: clamp(14px, 11vh, 22px); font-weight: 500; }
+  .artist { font-size: clamp(12px, 8vh, 16px); color: var(--muted); }
+
+  .eq { display: flex; align-items: flex-end; gap: 3px; height: 18px; flex: none; }
+  .eq i { width: 4px; height: 4px; background: var(--muted); }
+  .eq.on i { background: var(--green); animation: eq 0.9s steps(4) infinite alternate; }
+  .eq.on i:nth-child(2) { animation-delay: -0.3s; }
+  .eq.on i:nth-child(3) { animation-delay: -0.6s; }
+  .eq.on i:nth-child(4) { animation-delay: -0.45s; }
+  @keyframes eq { from { height: 4px; } to { height: 18px; } }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="art">
+    <canvas id="art" width="76" height="48"></canvas>
+    <img id="cover" alt="" hidden>
+  </div>
+  <div class="info">
+    <div class="title" id="title">Spotify</div>
+    <div class="artist" id="artist">nada tocando</div>
+  </div>
+  <div class="eq" id="eq"><i></i><i></i><i></i><i></i></div>
+</main>
+
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const DEMO = params.has('demo');
+
+  const $ = (s) => document.querySelector(s);
+
+  /* ---------- Estado da música ---------- */
+  const now = { track: null, artist: '', playing: false };
+
+  function show() {
+    $('#title').textContent = now.track || 'Spotify';
+    $('#artist').textContent = now.track ? now.artist : status;
+    $('#eq').classList.toggle('on', now.playing);
+  }
+  let status = 'conectando…';
+
+  /* ---------- Arte em pixel ---------- */
+  const LW = 76, LH = 48;
+  const cv = $('#art'), ctx = cv.getContext('2d');
+  const img = ctx.createImageData(LW, LH), buf = new Uint32Array(img.data.buffer);
+  const rgb = ([r, g, b]) => (255 << 24) | (b << 16) | (g << 8) | r;
+  const add = (c, k) => c.map((v) => Math.min(255, v + k));
+
+  const CX0 = 3, CY0 = 4, CS = 40;          // capa
+  const DCX = 53, DCY = 24, DR = 21, LR = 10; // disco e selo
+  const BG = rgb([25, 25, 25]);
+  const GREEN = rgb([29, 185, 84]), GREEN_D = rgb([22, 150, 68]), LOGO = rgb([18, 18, 18]);
+
+  // parte fixa do disco (sulcos e reflexo de luz parado)
+  const base = new Uint32Array(LW * LH).fill(BG);
+  const label = [];
+  for (let y = 0; y < LH; y++) {
+    for (let x = 0; x < LW; x++) {
+      const dx = x + 0.5 - DCX, dy = y + 0.5 - DCY, r = Math.hypot(dx, dy);
+      if (r > DR) continue;
+      if (r <= LR) { label.push([y * LW + x, dx, dy, r]); continue; }
+      let c = Math.floor(r) % 2 ? [22, 22, 22] : [16, 16, 16];
+      if (r > DR - 1) c = [40, 40, 40];
+      else if (r < LR + 1.2) c = [11, 11, 11];
+      const sh = Math.cos(2 * (Math.atan2(dy, dx) + Math.PI / 4));
+      if (sh > 0.9) c = add(c, 24); else if (sh > 0.7) c = add(c, 11);
+      base[y * LW + x] = rgb(c);
+    }
+  }
+
+  // símbolo do Spotify: três arcos, em coordenadas do selo (-1..1)
+  const ARCS = [[1.25, 1.55, 0.62, 0.1], [1.35, 1.3, 0.5, 0.09], [1.35, 1.0, 0.4, 0.08]];
+  const inLogo = (u, v) => ARCS.some(([cy, r, w, t]) => Math.abs(u) <= w && Math.abs(Math.hypot(u, v - cy) - r) < t);
+
+  // capa: canvas pequeno com a capa pixelada
+  const cover = document.createElement('canvas');
+  cover.width = cover.height = CS;
+  const cctx = cover.getContext('2d');
+
+  function placeholderCover() {
+    cctx.fillStyle = '#222'; cctx.fillRect(0, 0, CS, CS);
+    cctx.fillStyle = '#2b2b2b'; cctx.fillRect(0, 0, CS, 1); cctx.fillRect(0, 0, 1, CS);
+    const NOTE = ['..######', '..#....#', '..#....#', '..#....#', '..#....#', '###..###', '###..###'];
+    cctx.fillStyle = '#3d3d3d';
+    NOTE.forEach((row, y) => [...row].forEach((ch, x) => { if (ch === '#') cctx.fillRect(12 + x * 2, 13 + y * 2, 2, 2); }));
+  }
+
+  function demoCover() {
+    const sky = ['#2b1b4a', '#4a2160', '#7a2c6b', '#b2416b', '#e0645c', '#f59a52'];
+    sky.forEach((c, i) => { cctx.fillStyle = c; cctx.fillRect(0, i * 4, CS, 4); });
+    cctx.fillStyle = '#ffd36b';
+    for (let y = 0; y < 10; y++) for (let x = 0; x < 20; x++)
+      if (Math.hypot(x - 9.5, y - 9.5) < 9.5) cctx.fillRect(10 + x, 14 + y, 1, 1);
+    cctx.fillStyle = '#1d2a4d'; cctx.fillRect(0, 24, CS, 16);
+    cctx.fillStyle = '#ffd36b';
+    [[14, 27, 12], [16, 30, 8], [18, 33, 4]].forEach(([x, y, w]) => cctx.fillRect(x, y, w, 1));
+  }
+
+  // capa real (sem pixel art), por cima da arte
+  const coverEl = $('#cover');
+  coverEl.onload = () => { coverEl.hidden = false; };
+  coverEl.onerror = () => { coverEl.hidden = true; };
+  function setCover(url) {
+    if (!url) { coverEl.hidden = true; coverEl.removeAttribute('src'); }
+    else if (coverEl.getAttribute('src') !== url) coverEl.src = url;
+  }
+
+  let angle = 0, speed = 0, last = performance.now();
+
+  function draw() {
+    buf.set(base);
+    const c = Math.cos(-angle), s = Math.sin(-angle);
+    for (const [i, dx, dy, r] of label) {
+      if (r < 1.3) { buf[i] = BG; continue; }
+      const u = (dx * c - dy * s) / LR, v = (dx * s + dy * c) / LR;
+      buf[i] = inLogo(u, v) ? LOGO : r > LR - 0.8 ? GREEN_D : GREEN;
+    }
+    ctx.putImageData(img, 0, 0);
+    ctx.fillStyle = 'rgba(0,0,0,.4)';
+    ctx.fillRect(CX0 + CS, CY0 + 1, 1, CS);
+    ctx.fillRect(CX0 + 1, CY0 + CS, CS, 1);
+    ctx.drawImage(cover, CX0, CY0);
+  }
+
+  function frame(ts) {
+    const dt = Math.min(0.05, (ts - last) / 1000);
+    last = ts;
+    // tocando: gira a ~27 rpm; pausado: para; sem música: gira devagar
+    const target = now.playing ? 0.45 : now.track ? 0 : 0.12;
+    speed += (target - speed) * Math.min(1, dt * 2);
+    angle += speed * dt * Math.PI * 2;
+    draw();
+    requestAnimationFrame(frame);
+  }
+
+  /* ---------- Mídia do Windows (enviada pelo tocando-agora.ps1 via ntfy.sh) ---------- */
+  const TOPIC = 'tocando-qg7nenigjw2v4uw22vw9p5'; // mesmo código secreto do tocando-agora.ps1
+  let lastMsg = null;
+
+  const decode = (b64) => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))));
+
+  // sem mensagem nova, considera parado quando a música já teria acabado
+  // (o programa não avisa quando o computador desliga)
+  function stillPlaying(d, at) {
+    const left = d.dur > 0 ? Math.max(0, d.dur - d.pos) + 60 : 20 * 60;
+    return d.playing && Date.now() < at + left * 1000;
+  }
+
+  function apply() {
+    if (!lastMsg) return;
+    const { d, at, cover } = lastMsg;
+    if (d.title) Object.assign(now, { track: d.title, artist: d.artist, playing: stillPlaying(d, at) });
+    else { Object.assign(now, { track: null, playing: false }); status = 'nada tocando'; }
+    setCover(d.title ? cover : null);
+    show();
+  }
+
+  function receive(m) {
+    if (m.event !== 'message' || (lastMsg && m.time * 1000 < lastMsg.at)) return;
+    try {
+      lastMsg = { d: decode(m.message), at: m.time * 1000, cover: m.attachment?.url || null };
+      apply();
+    } catch (err) { /* mensagem que não é do programa */ }
+  }
+
+  function setStatus(s) { status = s; if (!now.track) show(); }
+
+  // jeito principal: conexão contínua (SSE), recebe na hora
+  function listen() {
+    let es;
+    try { es = new EventSource(`https://ntfy.sh/${TOPIC}/sse?since=latest`); }
+    catch (e) { return poll(); }
+    es.onopen = () => setStatus('nada tocando');
+    es.onmessage = (e) => { try { receive(JSON.parse(e.data)); } catch (err) {} };
+    es.onerror = () => { if (!lastMsg) { es.close(); poll(); } };
+  }
+
+  // plano B: pergunta a cada 15 s (o ntfy.sh limita consultas muito frequentes)
+  async function poll() {
+    try {
+      const r = await fetch(`https://ntfy.sh/${TOPIC}/json?poll=1&since=latest`, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const lines = (await r.text()).trim().split('\n').filter(Boolean);
+      if (lines.length) receive(JSON.parse(lines[lines.length - 1]));
+      else setStatus('nada tocando');
+    } catch (e) {
+      setStatus('sem conexão (' + (e.message || 'bloqueado') + ')');
+    }
+    setTimeout(poll, 15000);
+  }
+
+  /* ---------- Início ---------- */
+  placeholderCover();
+  if (DEMO) {
+    Object.assign(now, { track: 'Lo-fi para estudar', artist: 'Playlist da tarde', playing: true });
+    demoCover(); show();
+  } else {
+    listen();
+    setInterval(apply, 5000);
+  }
+  requestAnimationFrame((ts) => { last = ts; frame(ts); });
+})();
+</script>
+</body>
+</html>
