@@ -166,8 +166,8 @@
   function frame(ts) {
     const dt = Math.min(0.05, (ts - last) / 1000);
     last = ts;
-    // tocando: gira a ~27 rpm; pausado: para; sem música: gira devagar
-    const target = now.playing ? 0.45 : now.track ? 0 : 0.12;
+    // tocando: gira a ~27 rpm; pausado ou sem música: gira devagar
+    const target = now.playing ? 0.45 : 0.12;
     speed += (target - speed) * Math.min(1, dt * 2);
     angle += speed * dt * Math.PI * 2;
     draw();
@@ -239,17 +239,17 @@
 
   function setStatus(s) { status = s; if (!now.track) show(); }
 
-  // jeito principal: conexão contínua (SSE), recebe na hora
+  // conexão contínua (SSE): recebe na hora quando a rede deixa
   function listen() {
-    let es;
-    try { es = new EventSource(`https://ntfy.sh/${TOPIC}/sse?since=latest`); }
-    catch (e) { return poll(); }
-    es.onopen = () => setStatus('nada tocando');
-    es.onmessage = (e) => { try { receive(JSON.parse(e.data)); } catch (err) {} };
-    es.onerror = () => { if (!lastMsg) { es.close(); poll(); } };
+    try {
+      const es = new EventSource(`https://ntfy.sh/${TOPIC}/sse?since=latest`);
+      es.onopen = () => setStatus('nada tocando');
+      es.onmessage = (e) => { try { receive(JSON.parse(e.data)); } catch (err) {} };
+    } catch (e) { /* sem SSE: fica só a consulta abaixo */ }
   }
 
-  // plano B: pergunta a cada 15 s (o ntfy.sh limita consultas muito frequentes)
+  // consulta a última mensagem a cada 15 s, porque dentro do Notion a conexão
+  // contínua pode ficar presa (o ntfy.sh limita consultas mais frequentes)
   async function poll() {
     try {
       const r = await fetch(`https://ntfy.sh/${TOPIC}/json?poll=1&since=latest`, { cache: 'no-store' });
@@ -258,9 +258,8 @@
       if (lines.length) receive(JSON.parse(lines[lines.length - 1]));
       else setStatus('nada tocando');
     } catch (e) {
-      setStatus('sem conexão (' + (e.message || 'bloqueado') + ')');
+      if (!lastMsg) setStatus('sem conexão (' + (e.message || 'bloqueado') + ')');
     }
-    setTimeout(poll, 15000);
   }
 
   /* ---------- Início ---------- */
@@ -271,7 +270,12 @@
   } else if (!TOPIC || !KEY) {
     setStatus('link sem a chave');
   } else {
-    importKeys().then(listen, () => setStatus('chave inválida'));
+    importKeys().then(() => {
+      listen();
+      poll();
+      setInterval(poll, 15000);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+    }, () => setStatus('chave inválida'));
     setInterval(apply, 5000);
   }
   requestAnimationFrame((ts) => { last = ts; frame(ts); });
