@@ -174,11 +174,38 @@
     requestAnimationFrame(frame);
   }
 
-  /* ---------- Mídia do Windows (enviada pelo tocando-agora.ps1 via ntfy.sh) ---------- */
-  const TOPIC = 'tocando-qg7nenigjw2v4uw22vw9p5'; // mesmo código secreto do tocando-agora.ps1
-  let lastMsg = null;
+  /* ---------- Mídia do Windows (enviada pelo tocando-agora.ps1 via ntfy.sh, criptografada) ---------- */
+  // o tópico e a chave vêm do link: .../tocando-agora/#t=TOPICO&k=CHAVE
+  // (ficam só no Notion e no tocando-agora.ps1; o site publicado não tem nenhum segredo)
+  const secret = new URLSearchParams(location.hash.slice(1) || location.search.slice(1));
+  const TOPIC = secret.get('t'), KEY = secret.get('k');
+  let lastMsg = null, encKey, macKey;
+  const coverState = { att: null, src: null };
 
-  const decode = (b64) => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))));
+  const fromB64 = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+
+  async function importKeys() {
+    const raw = fromB64(KEY);
+    encKey = await crypto.subtle.importKey('raw', raw.slice(0, 32), 'AES-CBC', false, ['decrypt']);
+    macKey = await crypto.subtle.importKey('raw', raw.slice(32, 64), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
+  }
+
+  // formato: IV (16) + dados criptografados + assinatura HMAC (32)
+  async function unprotect(bytes) {
+    const body = bytes.slice(0, -32), mac = bytes.slice(-32);
+    if (!(await crypto.subtle.verify('HMAC', macKey, mac, body))) throw new Error('assinatura inválida');
+    return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-CBC', iv: body.slice(0, 16) }, encKey, body.slice(16)));
+  }
+
+  async function loadCover(att, type) {
+    try {
+      const bytes = await unprotect(new Uint8Array(await (await fetch(att)).arrayBuffer()));
+      if (coverState.att !== att) return;
+      if (coverState.src) URL.revokeObjectURL(coverState.src);
+      coverState.src = URL.createObjectURL(new Blob([bytes], { type: type || 'image/jpeg' }));
+      apply();
+    } catch (e) { /* capa expirada ou inválida: fica sem capa */ }
+  }
 
   // sem mensagem nova, considera parado quando a música já teria acabado
   // (o programa não avisa quando o computador desliga)
@@ -189,19 +216,25 @@
 
   function apply() {
     if (!lastMsg) return;
-    const { d, at, cover } = lastMsg;
+    const { d, at } = lastMsg;
     if (d.title) Object.assign(now, { track: d.title, artist: d.artist, playing: stillPlaying(d, at) });
     else { Object.assign(now, { track: null, playing: false }); status = 'nada tocando'; }
-    setCover(d.title ? cover : null);
+    setCover(d.title ? coverState.src : null);
     show();
   }
 
-  function receive(m) {
+  async function receive(m) {
     if (m.event !== 'message' || (lastMsg && m.time * 1000 < lastMsg.at)) return;
-    try {
-      lastMsg = { d: decode(m.message), at: m.time * 1000, cover: m.attachment?.url || null };
-      apply();
-    } catch (err) { /* mensagem que não é do programa */ }
+    let d;
+    try { d = JSON.parse(new TextDecoder().decode(await unprotect(fromB64(m.message)))); }
+    catch (err) { return; } // mensagem antiga ou de outra chave
+    lastMsg = { d, at: m.time * 1000 };
+    const att = d.title && m.attachment?.url;
+    if (att !== coverState.att) {
+      Object.assign(coverState, { att: att || null, src: null });
+      if (att) loadCover(att, d.ctype);
+    }
+    apply();
   }
 
   function setStatus(s) { status = s; if (!now.track) show(); }
@@ -235,8 +268,10 @@
   if (DEMO) {
     Object.assign(now, { track: 'Lo-fi para estudar', artist: 'Playlist da tarde', playing: true });
     demoCover(); show();
+  } else if (!TOPIC || !KEY) {
+    setStatus('link sem a chave');
   } else {
-    listen();
+    importKeys().then(listen, () => setStatus('chave inválida'));
     setInterval(apply, 5000);
   }
   requestAnimationFrame((ts) => { last = ts; frame(ts); });
